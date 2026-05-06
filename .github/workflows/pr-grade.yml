@@ -30,13 +30,13 @@ jobs:
         run: npm ci --legacy-peer-deps
 
       - name: Install lint toolchain
-        run: npm install --no-save --legacy-peer-deps eslint@8 eslint-config-airbnb-base eslint-plugin-import
+        run: npm install --no-save eslint@8 eslint-config-airbnb-base eslint-plugin-import
 
       - name: Run ESLint
         id: lint
         continue-on-error: true
         run: |
-          ./node_modules/.bin/eslint . --max-warnings=0 --rule 'camelcase:["error",{"properties":"always"}]' 2>&1 | tee /tmp/lint-output.txt
+          npx --yes eslint@8 . --max-warnings=0 --rule 'camelcase:["error",{"properties":"always"}]' 2>&1 | tee /tmp/lint-output.txt
           exit ${PIPESTATUS[0]}
 
       - name: Read lint output
@@ -270,28 +270,24 @@ jobs:
             process.exit(0);
           }
 
-          const exportName = typeof orig.price === 'function' ? 'price' : 'calculatePrice';
-          const origFn = orig[exportName];
+          const origFn = orig.price;
           if (typeof origFn !== 'function') {
-            console.log('No price or calculatePrice export found — skipping adapter');
+            console.log('price export is not a function — skipping adapter');
             process.exit(0);
           }
-          console.log(`Found export: ${exportName}`);
 
           // Probe: call with the canonical signature and check known-good output.
-          // Low season, 1 day, Compact, age 30, licenseYears 10 => $30
-          // LY=10 ensures students who default undefined→0 don't get a license
-          // error and a false probe miss.
+          // Low season, 1 day, Compact, age 30 => $30
           const PICKUP = 'A', DROPOFF = 'B';
           const PD = '2024-02-12', DD = '2024-02-12';
-          const TYPE = 'Compact', AGE = 30, LY = 10;
+          const TYPE = 'Compact', AGE = 30;
           const EXPECTED = '$30';
 
           function probe(fn, args) {
             try { return fn(...args) === EXPECTED; } catch { return false; }
           }
 
-          if (probe(origFn, [PICKUP, DROPOFF, PD, DD, TYPE, AGE, LY])) {
+          if (probe(origFn, [PICKUP, DROPOFF, PD, DD, TYPE, AGE])) {
             console.log('Standard signature confirmed — no adapter needed');
             process.exit(0);
           }
@@ -299,11 +295,11 @@ jobs:
           let adapterLines = null;
 
           // Case 1: location params (pickup, dropoff) removed — price(pickupDate, dropoffDate, type, age, ...)
-          if (probe(origFn, [PD, DD, TYPE, AGE, LY])) {
+          if (probe(origFn, [PD, DD, TYPE, AGE])) {
             console.log('Detected: location params removed — injecting positional adapter');
             adapterLines = [
               "const s = require('./rentalPrice.student.js');",
-              "const f = s." + exportName + ";",
+              "const f = s.price;",
               "function price(pickup, dropoff, pickupDate, dropoffDate, type, age, ...rest) {",
               "  return f(pickupDate, dropoffDate, type, age, ...rest);",
               "}",
@@ -312,11 +308,11 @@ jobs:
           }
 
           // Case 2: object-style params — price({ pickup, dropoff, pickupDate, dropoffDate, type, age })
-          if (!adapterLines && probe(origFn, [{ pickup: PICKUP, dropoff: DROPOFF, pickupDate: PD, dropoffDate: DD, type: TYPE, age: AGE, licenseYears: LY }])) {
+          if (!adapterLines && probe(origFn, [{ pickup: PICKUP, dropoff: DROPOFF, pickupDate: PD, dropoffDate: DD, type: TYPE, age: AGE }])) {
             console.log('Detected: object-style params — injecting object adapter');
             adapterLines = [
               "const s = require('./rentalPrice.student.js');",
-              "const f = s." + exportName + ";",
+              "const f = s.price;",
               "function price(pickup, dropoff, pickupDate, dropoffDate, type, age, licenseYears) {",
               "  return f({ pickup, dropoff, pickupDate, dropoffDate, type, age, licenseYears });",
               "}",
@@ -324,24 +320,8 @@ jobs:
             ];
           }
 
-          // Case 3: standard signature but exported as calculatePrice
-          if (!adapterLines && exportName !== 'price') {
-            if (probe(origFn, [PICKUP, DROPOFF, PD, DD, TYPE, AGE, LY])) {
-              console.log('Detected: standard signature exported as calculatePrice — aliasing');
-              adapterLines = [
-                "const s = require('./rentalPrice.student.js');",
-                "const price = s.calculatePrice;",
-                "module.exports = { ...s, price };",
-              ];
-            }
-          }
-
           if (!adapterLines) {
-            // Sample the actual return value to give a more useful log message
-            let sample;
-            try { sample = JSON.stringify(origFn(PICKUP, DROPOFF, PD, DD, TYPE, AGE, LY)); } catch (e) { sample = String(e); }
-            console.log('No compatible signature detected. Sample return value: ' + sample);
-            console.log('Likely cause: function returns a non-string type (e.g. object). Running tests as-is — they will fail if the API contract changed.');
+            console.log('Could not detect a compatible signature — running tests as-is');
             process.exit(0);
           }
 
